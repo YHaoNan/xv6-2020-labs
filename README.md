@@ -35,4 +35,60 @@ $
 [user/pingpong.c](./user/pingpong.c)
 
 
+## primes (moderate)/(hard)
+
+> Write a concurrent version of prime sieve using pipes. This idea is due to Doug McIlroy, inventor of Unix pipes. The picture halfway down [this page](http://swtch.com/~rsc/thread/) and the surrounding text explain how to do it. Your solution should be in the file user/primes.c.
+
+并发素数筛算法伪代码：
+```
+p = get a number from left neighbor
+print p
+loop:
+    n = get a number from left neighbor
+    if (p does not divide n)
+        send n to right neighbor
+```
+
+这个提示很重要，因为没仔细阅读这个提示，我的程序发生了死锁：
+- `read` returns zero when the write-side of a pipe is closed.
+
+> 我把右侧进程管道的写端的`close`放到`wait`这个进程结束之后了，导致`read`等待写端被关闭，而持有写端的进程等待该进程结束。
+
+
+[user/primes.c](./user/primes.c)
+
+## find (moderate)
+
+> Write a simple version of the UNIX find program: find all the files in a directory tree with a specific name. Your solution should be in the file user/find.c.
+
+需要注意的点：
+- xv6作为一个为教育目的开发的小型系统，它给一个进程可以打开的文件描述符十分有限。我在debug代码时发现`open`调用总是会返回负数的文件描述符，我不明白为啥，明明文件存在，也可以正常读取。后来发现是我的代码里没有关闭文件描述符，导致我的进程不能打开更多的文件。xv6给一个进程的最大文件描述符个数只有16个，在`kernel/param.h`中定义。虽然常见的商用系统不可能如此极端，但是如果不及时close，我们会占用很多个文件描述符。对于内存也一样。
+
+
+[user/find.c](./user/find.c)
+
+## xargs (moderate)
+
+> Write a simple version of the UNIX xargs program: read lines from the standard input and run a command for each line, supplying the line as arguments to the command. Your solution should be in the file user/xargs.c.
+
+示例：
+```sh
+$ echo hello too | xargs echo bye
+bye hello too
+```
+
+To test your solution for xargs, run the shell script xargstest.sh. Your solution is correct if it produces the following output:
+```sh
+$ make qemu
+...
+init: starting sh
+$ sh < xargstest.sh
+$ $ $ $ $ $ hello
+hello
+hello
+$ $   
+```
+
+
+[user/xargs.c](./user/xargs.c)
 
