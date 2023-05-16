@@ -211,3 +211,25 @@ Makefile中包含了对该脚本的调用，该脚本生成所有系统调用的
 ## Sysinfo (moderate)
 
 > In this assignment you will add a system call, sysinfo, that collects information about the running system. The system call takes one argument: a pointer to a struct sysinfo (see kernel/sysinfo.h). The kernel should fill out the fields of this struct: the freemem field should be set to the number of bytes of free memory, and the nproc field should be set to the number of processes whose state is not UNUSED. We provide a test program sysinfotest; you pass this assignment if it prints "sysinfotest: OK".
+
+当你为xv6实现一个系统调用时，你要做一些重复的操作，这些重复的操作在上面一个实验中已经有了，这个实验只会说和实现sysinfo紧密相关的那些。
+
+在`kernel/kalloc.c`和`kernel/proc.c`中分别维护和内存大小、进程数量相关的变量，并向外部提供函数获取它。在内存分配中，每次分配一个页面，`freelist`的锁会保护计数器的更新，在进程管理中，分配和释放进程结构都需要持有进程的锁，我没有太仔细地阅读代码，但我认为当前的实现依然是正确的。
+
+这里不放`kfreemem`和`proc_count`的实现了，可以自己去代码里找，只放`sys_sysinfo`的实现：
+```c
+// kernel/sysproc.c
+uint64 
+sys_sysinfo(void) {
+  uint64 user_pointer;
+  if (argaddr(0, &user_pointer) < 0) 
+    return -1;
+  struct sysinfo si = {kfreemem(), proc_count()};
+  if(copyout(myproc()->pagetable, user_pointer, (char *)&si, sizeof(si)) < 0) {
+    return -1;
+  }
+  return 0;
+}
+```
+
+一个有趣的点是我们需要`copyout`函数将处于内核页表中的`struct sysinfo`复制到用户提供的指针上，对于特别大的数据结构，内核态到用户态的复制可能会很耗时。现存的系统中可能会有某种zero copy技术？
