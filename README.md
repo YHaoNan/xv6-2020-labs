@@ -106,6 +106,102 @@ sub getpid: 4, ugetpid: 4
 
 ## Print a page table (easy)
 
+To help you learn about RISC-V page tables, and perhaps to aid future debugging, your first task is to write a function that prints the contents of a page table.
+
+> Define a function called vmprint(). It should take a pagetable_t argument, and print that pagetable in the format described below. Insert if(p->pid==1) vmprint(p->pagetable) in exec.c just before the return argc, to print the first process's page table. You receive full credit for this assignment if you pass the pte printout test of make grade.
+
+Now when you start xv6 it should print output like this, describing the page table of the first process at the point when it has just finished exec()ing init:
+
+```text
+page table 0x0000000087f6e000
+..0: pte 0x0000000021fda801 pa 0x0000000087f6a000
+.. ..0: pte 0x0000000021fda401 pa 0x0000000087f69000
+.. .. ..0: pte 0x0000000021fdac1f pa 0x0000000087f6b000
+.. .. ..1: pte 0x0000000021fda00f pa 0x0000000087f68000
+.. .. ..2: pte 0x0000000021fd9c1f pa 0x0000000087f67000
+..255: pte 0x0000000021fdb401 pa 0x0000000087f6d000
+.. ..511: pte 0x0000000021fdb001 pa 0x0000000087f6c000
+.. .. ..510: pte 0x0000000021fdd807 pa 0x0000000087f76000
+.. .. ..511: pte 0x0000000020001c0b pa 0x0000000080007000
+```
+
+写起来挺简单的：
+
+```c
+// kernel/vm.c
+void __print_level(int level) {
+  for (int i=1;i<=level; i++) {
+    printf("..");
+    if (i!=level) {
+      printf(" ");
+    }
+  }
+}
+
+// 给定一个页表的起始地址，遍历页表中的512个页表项，并对每一个子页表调用__vmprint
+void 
+__vmprint(pagetable_t pgtbl, int level) {
+  for (int i=0; i<512; i++) {
+    pte_t pte = pgtbl[i];
+    
+    if (pte & PTE_V) {
+      uint64 pa = PTE2PA(pte);
+      __print_level(level);
+      printf("%d: pte %p pa %p\n", i, pte, pa);
+      if (level < 3) __vmprint((uint64*)pa, level + 1);
+    }
+  }
+}
+
+void
+vmprint(pagetable_t pgtbl) {
+  printf("page table %p\n", pgtbl);
+  __vmprint(pgtbl, 1);
+}
+```
+
+> 别忘了在kernel/def.h中添加相应定义
+
+> 教案上将每一个PTE画成了54位，也就是6个字节零6位，可计算机并不允许我们以位进行寻址。通过阅读`walk`的代码，发现了这种通过将`pagetable_t`作为一个uint64数组的方式来遍历每一个pte的方式，这也意味着每一个PTE实际上占用64位（8字节），并非教案上画的54。所以，pte中高十位是没用的。
+
+问题：
+
+Explain the output of vmprint in terms of Fig 3-4 from the text. What does page 0 contain? What is in page 2? When running in user mode, could the process read/write the memory mapped by page 1?
+
+```text
+# Fig 3-4
+page table 0x0000000087f6d000
+.. 0: pte 0x0000000021fda001 pa 0x0000000087f68000
+.. .. 0: pte 0x0000000021fd9c01 pa 0x0000000087f67000
+.. .. .. 0: pte 0x0000000021fda41f pa 0x0000000087f69000
+.. .. .. 1: pte 0x0000000021fd980f pa 0x0000000087f66000
+.. .. .. 2: pte 0x0000000021fd941f pa 0x0000000087f65000
+.. 255: pte 0x0000000021fdb001 pa 0x0000000087f6c000
+.. .. 511: pte 0x0000000021fdac01 pa 0x0000000087f6b000
+.. .. .. 509: pte 0x0000000021fda813 pa 0x0000000087f6a000
+.. .. .. 510: pte 0x0000000021fdd807 pa 0x0000000087f76000
+.. .. .. 511: pte 0x0000000020001c0b pa 0x0000000080007000
+```
+
+页面0到页面2都在用户虚拟地址的低处，我们已知stack和guard page肯定是每一个占用一个虚拟页，所以页0应该是用于保存进程所执行程序的文本和数据，页1是guard page，页2是stack。
+
+![xv6用户进程地址空间](./scshot01.png)
+
+关于页1用户进程能不能读写，根据它的PTE内容的最后十位`0000001111`，可以看出它的`PTE_U`标记是没有打开的，用户进程不能访问。
+
+在类unix系统中，进程只能是从一个进程fork出来的，也就是说，如果没有其它系统调用，所有的进程都在执行`/init`程序。`exec`系统调用给了进程放弃当前的所有，执行新程序的能力。在xv6中，exec做的事大概如下：
+1. 为进程创建一个新的pagetable，但目前还不应用，依然使用原先的pagetable
+2. 读取ELF中的Program Header，对类型为`ELF_PROG_LOAD`（1）的，加载其中定义的部分到新页表的指定地址上，xv6中的可执行程序只有一个要加载的，实际上这个东西会占用一个页的大小（我不确定对于大型程序会不会占用更多，或是xv6硬性要求不允许超过一个页，我只用gdb调试了一个小型程序）
+3. 在新页表中刚刚加载的内容上面创建两个新页，一个用于stack，一个用于guardpage
+4. 将argc和argv复制到刚刚创建的栈上，确保程序启动时能够正确的读到argc和argv
+5. 切换进程结构中的页表、pc计数器、栈指针，释放老页表
+
+所以，我们也可以通过分析exec的执行过程回答上面的问题。
+
+嘶，既然xv6把程序数据和文本数据弄到一个页里了，那我们理论上是能修改进程中的代码的，因为这个页具有RWX标记！！
+
+那么，`vmprint`打印出的最后三个页面是干啥的？最后的是trampoline，倒数第二个是trapframe，倒数第三个是我们映射的usyscall，如果你去看官方lab的打印结果，它们没有我们最后509那个页表项。
+
 ## A kernel page table per process (hard)
 
 ## Simplify copyin/copyinstr (hard)
