@@ -202,6 +202,219 @@ page table 0x0000000087f6d000
 
 那么，`vmprint`打印出的最后三个页面是干啥的？最后的是trampoline，倒数第二个是trapframe，倒数第三个是我们映射的usyscall，如果你去看官方lab的打印结果，它们没有我们最后509那个页表项。
 
+> 这实验做起来不难，花不了多久，但是总是有很多可以追问的问题，它们才是最消磨时间的...
+
 ## A kernel page table per process (hard)
+
+Xv6 has a single kernel page table that's used whenever it executes in the kernel. The kernel page table is a direct mapping to physical addresses, so that kernel virtual address x maps to physical address x. Xv6 also has a separate page table for each process's user address space, containing only mappings for that process's user memory, starting at virtual address zero. Because the kernel page table doesn't contain these mappings, user addresses are not valid in the kernel. Thus, when the kernel needs to use a user pointer passed in a system call (e.g., the buffer pointer passed to write()), the kernel must first translate the pointer to a physical address. The goal of this section and the next is to allow the kernel to directly dereference user pointers.
+
+> Your first job is to modify the kernel so that every process uses its own copy of the kernel page table when executing in the kernel. Modify struct proc to maintain a kernel page table for each process, and modify the scheduler to switch kernel page tables when switching processes. For this step, each per-process kernel page table should be identical to the existing global kernel page table. You pass this part of the lab if usertests runs correctly.
+
+### 分析
+
+比较容易想到的解法是完整的复制所有三级内核页表。公开课老师给出的做法是只为每个进程创建一个根页表，然后根页表的第0个页表项每个进程独自使用，1~511则是通用，所以只需要简单的将1~511的PTE复制过去即可。
+
+老师这样做的原因貌似是因为下面的实验限制了不让用户空间的虚拟地址增长到PLIC（0x0C000000）以上，所以在那之上的内存都不会因为进程不同而改变，换句话说就是无论在哪个进程的内核页表中它们都是通用的，所以直接共享PTE即可。PLIC被映射到根页表的0号PTE覆盖的内存中，意味着0号PTE覆盖的所有内存里有一部分不能共享，所以我们没有复制它。
+
+xv6原来的内核页表中的一些设备映射到了0号PTE覆盖的虚拟地址空间中，所以如果采用老师的方法，要手动映射那些设备。
+
+还有就是每个内核有独立的内核页表了，内核栈也可以独立起来了，而且如果采用老师的办法，内核栈必须在0号PTE覆盖的虚拟地址空间中，否则会混乱。
+
+### 过程
+
+**Step1. 在`kernel/proc.h`的proc结构体中添加`kpagetable`，指向它自己的内核页表**
+
+**Step2. 创建`kvmpagetable_init()`，为进程创建自己的内核页表**
+
+```c
+// kernel/vm.c
+void
+kvmmap2(pagetable_t kpgtable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(kpgtable, va, sz, pa, perm) != 0)
+    panic("kvmmap2");
+}
+
+pagetable_t kvmpagetable_init() {
+  // 分配根页表
+  pagetable_t kpgtable = kalloc();
+  memset(kpgtable, 0, PGSIZE);
+  // 复制1~511的PTE
+  for (int i=1; i<512; i++) {
+    kpgtable[i] = kernel_pagetable[i];
+  }
+
+  // 映射在PTE0中的设备
+  kvmmap2(kpgtable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  kvmmap2(kpgtable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  kvmmap2(kpgtable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  kvmmap2(kpgtable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  return kpgtable;
+}
+```
+
+**Step3. 删除在`kernel/proc.c`中的`procinit()`函数里关于向全局页表项创建内核栈的代码**
+
+```c
+void
+procinit(void)
+{
+  struct proc *p;
+  
+  initlock(&pid_lock, "nextpid");
+  for(p = proc; p < &proc[NPROC]; p++) {
+      initlock(&p->lock, "proc");
+
+      // Allocate a page for the process's kernel stack.
+      // Map it high in memory, followed by an invalid
+      // guard page.
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
+  }
+  kvminithart();
+}
+```
+
+**Step4. 修改`allocproc`，在分配进程时创建它自己的内核页表和内核栈**
+
+```c
+static struct proc*
+allocproc(void) {
+  // ...
+
+  p->pagetable = proc_pagetable(p);
+  
+  if(p->pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 照着上面的创建user pagetable，创建一个kernel pagetable
+  p->kpagetable = kvmpagetable_init();
+  if(p->kpagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 把内核栈映射到虚拟地址4096上，让0~4095做guard page，不知道会不会有问题...
+  char *kstack = kalloc();
+  if (kstack == 0) {
+    panic("allocproc: create kstack faild.");
+  }
+
+  kvmmap2(p->kpagetable, 4096, kstack, PGSIZE, PTE_R | PTE_W);
+  p->kstack = 4096;
+
+  // ...
+}
+```
+
+**Step5. 在调度器swtch前后切换内核页表**
+
+```c
+extern pagetable_t kernel_pagetable;
+void
+scheduler(void)
+{
+  // ...
+
+    int found = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        // Switch to chosen process.  It is the process's job
+        // to release its lock and then reacquire it
+        // before jumping back to us.
+        p->state = RUNNING;
+        c->proc = p;
+        // 切换到进程p的内核页表，以便于我们能使用它的内核栈
+        w_satp(MAKE_SATP(p->kpagetable)); sfence_vma();
+        swtch(&c->context, &p->context);
+        // 我们必须切换回kernel_pagetable，因为这个进程可能是由于已经结束了才返回的，它的页表可能已经被释放
+        // 可是kernel_pagetable里面已经没有内核栈了啊呜呜呜喂！
+        w_satp(MAKE_SATP(kernel_pagetable)); sfence_vma();
+
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        c->proc = 0;
+
+        found = 1;
+        // ...
+
+}
+```
+
+**Step6. 在进程被释放时释放内核页表**，此时需要释放的只有内核栈的物理页以及根页表的物理页、根页表第0个PTE覆盖的所有中间页表的物理页：
+
+```c
+static void
+freeproc(struct proc *p)
+{
+  if(p->trapframe)
+    kfree((void*)p->trapframe);
+  p->trapframe = 0;
+  if(p->pagetable)
+    proc_freepagetable(p->pagetable, p->sz);
+  if (p->kpagetable) 
+    kvmfree_kpagetable(p->kpagetable);
+  p->pagetable = 0;
+  p->kpagetable = 0;
+  p->kstack = 0;
+  // ...
+}
+
+// 释放页表但不释放物理页
+void __kvmfree_pagetable(pagetable_t pgtbl) {
+  for (int i=0; i<512; i++) {
+    pte_t pte = pgtbl[i];
+    if (pte & PTE_V && (pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+      __kvmfree_pagetable((pagetable_t)PTE2PA(pte));
+    }
+    pgtbl[i] = 0;
+  }
+  kfree(pgtbl);
+}
+
+void 
+kvmfree_kpagetable(pagetable_t kpagetable) {
+  pte_t stack_pte = *walk(kpagetable, (uint64)4096, 0);
+  char *stack_pa = (char*)PTE2PA(stack_pte);
+
+  __kvmfree_pagetable((pagetable_t) PTE2PA(kpagetable[0]));
+
+  kfree(stack_pa);
+  kfree(kpagetable);
+}
+```
+
+**Step7. 运行发现在kvmpa这个函数panic了，发现它需要walk内核栈里的PTE，由于xv6最开始并不是独立内核页表的，所以它walk的是全局内核页表**，改成通过参数传递内核页表的，并且在用到这个函数的地方传入对应进程的内核页表（实际上在这个函数里获取当前进程的内核页表也行）：
+
+```c
+uint64
+kvmpa(pagetable_t kpagetable, uint64 va)
+{
+  uint64 off = va % PGSIZE;
+  pte_t *pte;
+  uint64 pa;
+
+  pte = walk(kpagetable, va, 0);
+  if(pte == 0)
+    panic("kvmpa 1");
+  if((*pte & PTE_V) == 0)
+    panic("kvmpa 2");
+  pa = PTE2PA(*pte);
+  return pa+off;
+}
+```
+
+> PS：在第一个实验（Speed up system call）中，向用户页表顶端添加了一个USYSCALL，那个会导致copyout测试不通过，应该是因为它多占用了一个物理页，把相关逻辑注释就好了。这个卡了我好久...
+
 
 ## Simplify copyin/copyinstr (hard)

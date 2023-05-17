@@ -34,12 +34,12 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -122,6 +122,21 @@ found:
     return 0;
   }
 
+  p->kpagetable = kvmpagetable_init();
+  if(p->kpagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  char *kstack = kalloc();
+  if (kstack == 0) {
+    panic("allocproc: create kstack faild.");
+  }
+
+  kvmmap2(p->kpagetable, 4096, (uint64)kstack, PGSIZE, PTE_R | PTE_W);
+  p->kstack = 4096;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,7 +157,11 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  if (p->kpagetable) 
+    kvmfree_kpagetable(p->kpagetable);
   p->pagetable = 0;
+  p->kpagetable = 0;
+  p->kstack = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -183,16 +202,16 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
-  struct usyscall *usyscall_ptr = kalloc();
-  usyscall_ptr->pid = p->pid;
+  // struct usyscall *usyscall_ptr = kalloc();
+  // usyscall_ptr->pid = p->pid;
 
-  // map the USYSCALL just below TRAPFRAME
-  if (mappages(pagetable, USYSCALL, PGSIZE,
-              (uint64) usyscall_ptr, PTE_R | PTE_U) < 0) {
-    uvmunmap(pagetable, USYSCALL, 1, 0);
-    uvmfree(pagetable, 0);
-    return 0;
-  }
+  // // map the USYSCALL just below TRAPFRAME
+  // if (mappages(pagetable, USYSCALL, PGSIZE,
+  //             (uint64) usyscall_ptr, PTE_R | PTE_U) < 0) {
+  //   uvmunmap(pagetable, USYSCALL, 1, 0);
+  //   uvmfree(pagetable, 0);
+  //   return 0;
+  // }
   
   return pagetable;
 }
@@ -204,7 +223,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmunmap(pagetable, USYSCALL, 1, 1);
+  // uvmunmap(pagetable, USYSCALL, 1, 1);
   uvmfree(pagetable, sz);
 }
 
@@ -466,6 +485,8 @@ wait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+
+extern pagetable_t kernel_pagetable;
 void
 scheduler(void)
 {
@@ -486,7 +507,9 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        w_satp(MAKE_SATP(p->kpagetable)); sfence_vma();
         swtch(&c->context, &p->context);
+        w_satp(MAKE_SATP(kernel_pagetable)); sfence_vma();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.

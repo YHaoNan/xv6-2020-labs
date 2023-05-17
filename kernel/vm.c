@@ -47,6 +47,55 @@ kvminit()
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+pte_t *
+walk(pagetable_t pagetable, uint64 va, int alloc);
+
+// 释放页表但不释放物理页
+void __kvmfree_pagetable(pagetable_t pgtbl) {
+  for (int i=0; i<512; i++) {
+    pte_t pte = pgtbl[i];
+    if (pte & PTE_V && (pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+      __kvmfree_pagetable((pagetable_t)PTE2PA(pte));
+    }
+    pgtbl[i] = 0;
+  }
+  kfree(pgtbl);
+}
+void 
+kvmfree_kpagetable(pagetable_t kpagetable) {
+  pte_t stack_pte = *walk(kpagetable, (uint64)4096, 0);
+  char *stack_pa = (char*)PTE2PA(stack_pte);
+
+  __kvmfree_pagetable((pagetable_t) PTE2PA(kpagetable[0]));
+
+  kfree(stack_pa);
+  kfree(kpagetable);
+}
+
+void
+kvmmap2(pagetable_t kpgtable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(kpgtable, va, sz, pa, perm) != 0)
+    panic("kvmmap2");
+}
+
+// Create a new kernel page table.
+// We don't map kernel stack in this function.
+pagetable_t kvmpagetable_init() {
+  // 分配根页表
+  pagetable_t kpgtable = kalloc();
+  memset(kpgtable, 0, PGSIZE);
+  for (int i=1; i<512; i++) {
+    kpgtable[i] = kernel_pagetable[i];
+  }
+
+  kvmmap2(kpgtable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  kvmmap2(kpgtable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  kvmmap2(kpgtable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  kvmmap2(kpgtable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  return kpgtable;
+}
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void
@@ -126,17 +175,17 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
 // addresses on the stack.
 // assumes va is page aligned.
 uint64
-kvmpa(uint64 va)
+kvmpa(pagetable_t kpagetable, uint64 va)
 {
   uint64 off = va % PGSIZE;
   pte_t *pte;
   uint64 pa;
-  
-  pte = walk(kernel_pagetable, va, 0);
+
+  pte = walk(kpagetable, va, 0);
   if(pte == 0)
-    panic("kvmpa");
+    panic("kvmpa 1");
   if((*pte & PTE_V) == 0)
-    panic("kvmpa");
+    panic("kvmpa 2");
   pa = PTE2PA(*pte);
   return pa+off;
 }
