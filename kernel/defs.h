@@ -170,9 +170,12 @@ pagetable_t     uvmcreate(void);
 void            uvminit(pagetable_t, uchar *, uint);
 uint64          uvmalloc(pagetable_t, uint64, uint64);
 uint64          uvmdealloc(pagetable_t, uint64, uint64);
+uint64          kvmdealloc(pagetable_t pagetable, uint oldsz, uint64 newsz);
 #ifdef SOL_COW
+
 #else
 int             uvmcopy(pagetable_t, pagetable_t, uint64);
+int             kvmcopy(pagetable_t old, pagetable_t new, uint64 start, uint64 sz);
 #endif
 void            uvmfree(pagetable_t, uint64);
 void            uvmunmap(pagetable_t, uint64, uint64, int);

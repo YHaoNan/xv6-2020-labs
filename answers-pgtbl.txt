@@ -1,0 +1,7 @@
+Explain the output of vmprint in terms of Fig 3-4 from the text. What does page 0 contain? What is in page 2? When running in user mode, could the process read/write the memory mapped by page 1?
+
+page0是程序的data和text，page2是进程用户栈。page1不能访问，因为它的PTE_U为0，所以用户不能访问。
+
+Explain why the third test srcva + len < srcva is necessary in copyin_new(): give values for srcva and len for which the first two test fail (i.e., they will not cause to return -1) but for which the third one is true (resulting in returning -1).
+
+防止srcva+len太大溢出

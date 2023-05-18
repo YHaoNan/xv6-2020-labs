@@ -133,9 +133,12 @@ found:
   if (kstack == 0) {
     panic("allocproc: create kstack faild.");
   }
+  
 
-  kvmmap2(p->kpagetable, 4096, (uint64)kstack, PGSIZE, PTE_R | PTE_W);
-  p->kstack = 4096;
+  // uint64 stack_va = KSTACK((int)(p - proc));
+  uint64 stack_va = NEWKSTACK;
+  kvmmap2(p->kpagetable, stack_va, (uint64)kstack, PGSIZE, PTE_R | PTE_W);
+  p->kstack = stack_va;
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -251,6 +254,7 @@ userinit(void)
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
+  kvmcopy(p->pagetable, p->kpagetable, 0, PGSIZE);
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -274,16 +278,26 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
+  if (sz + n >= PLIC) return -1;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    uint64 newsize;
+    if((newsize = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    if (kvmcopy(p->pagetable, p->kpagetable, sz, n) < 0) {
+      // 如果copy失败，视为grow失败，要把用户页表中的内容也dealloc掉
+      uvmdealloc(p->pagetable, newsize, sz);
+      return -1;
+    }
+    sz = newsize;
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    uvmdealloc(p->pagetable, sz, sz + n);
+    sz = kvmdealloc(p->kpagetable, sz, sz + n);
   }
   p->sz = sz;
   return 0;
 }
+
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
@@ -305,6 +319,13 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+
+  if (kvmcopy(np->pagetable, np->kpagetable, 0, p->sz) < 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+  
   np->sz = p->sz;
 
   np->parent = p;

@@ -414,7 +414,283 @@ kvmpa(pagetable_t kpagetable, uint64 va)
 }
 ```
 
-> PS：在第一个实验（Speed up system call）中，向用户页表顶端添加了一个USYSCALL，那个会导致copyout测试不通过，应该是因为它多占用了一个物理页，把相关逻辑注释就好了。这个卡了我好久...
+> PS：在第一个实验（Speed up system call）中，向用户页表顶端添加了一个USYSCALL，那个会导致execout测试不通过，应该是因为它多占用了一个物理页，把相关逻辑注释就好了。这个卡了我好久...
 
 
 ## Simplify copyin/copyinstr (hard)
+
+The kernel's copyin function reads memory pointed to by user pointers. It does this by translating them to physical addresses, which the kernel can directly dereference. It performs this translation by walking the process page-table in software. Your job in this part of the lab is to add user mappings to each process's kernel page table (created in the previous section) that allow copyin (and the related string function copyinstr) to directly dereference user pointers.
+
+> Replace the body of copyin in kernel/vm.c with a call to copyin_new (defined in kernel/vmcopyin.c); do the same for copyinstr and copyinstr_new. Add mappings for user addresses to each process's kernel page table so that copyin_new and copyinstr_new work. You pass this assignment if usertests runs correctly and all the make grade tests pass.
+
+This scheme relies on the user virtual address range not overlapping the range of virtual addresses that the kernel uses for its own instructions and data. Xv6 uses virtual addresses that start at zero for user address spaces, and luckily the kernel's memory starts at higher addresses. However, this scheme does limit the maximum size of a user process to be less than the kernel's lowest virtual address. After the kernel has booted, that address is 0xC000000 in xv6, the address of the PLIC registers; see kvminit() in kernel/vm.c, kernel/memlayout.h, and Figure 3-4 in the text. You'll need to modify xv6 to prevent user processes from growing larger than the PLIC address.
+
+### 修复之前闯的祸
+OK，看到这个题的第一反应就是上一个题目中我们自作聪明将内核栈映射到虚拟地址4096起始的一个页必须得改掉了......
+
+由于这个题目想要让我们在进程内核页表建立来自用户虚拟地址的映射，而用户虚拟地址在`[0, PLIC)`，这恰好包含了我们在`[0, 4096)`的guard page和`[4096, 8192)`的内核栈。嘶，既然低地址不能弄，我们就把它映射到根页表最后一个PTE能覆盖的最高地址吧
+
+```c
+// 1GB - GUARD PAGE and KSTACK PAGE
+#define NEWKSTACK ((512 * 512 * 4096) - (2 * PGSIZE))
+```
+
+> 我之前做实验的时候好像把guard page放到stack下面了！？
+
+```c
+// code in kernel/proc.c:allocproc
+
+// Change 4096 to NEWSTACK
+uint64 stack_va = NEWKSTACK
+kvmmap2(p->kpagetable, stack_va, (uint64)kstack, PGSIZE, PTE_R | PTE_W);
+p->kstack = stack_va;
+```
+
+然后释放页表的代码，也要改，我这里改了下名但是你改不改都无所谓：
+```c
+// 释放页表但不释放物理页
+void __free_pagetable(pagetable_t pgtbl) {
+  for (int i=0; i<512; i++) {
+    pte_t pte = pgtbl[i];
+    if (pte & PTE_V && (pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+      __free_pagetable((pagetable_t)PTE2PA(pte));
+    }
+    pgtbl[i] = 0;
+  }
+  kfree(pgtbl);
+}
+
+void kvmfree_kpagetable(pagetable_t kpagetable) {
+  // Change 4096 to NEWSTACK
+  pte_t stack_pte = *walk(kpagetable, NEWKSTACK, 0);
+  char *stack_pa = (char*)PTE2PA(stack_pte);
+
+  __free_pagetable((pagetable_t)PTE2PA(kpagetable[0]));
+  kfree(stack_pa);
+  kfree(kpagetable);
+}
+```
+
+### 分析&干活
+
+先说下copyin的使用场景，copyin复制处于用户页表中的数据到`dst`，该数据会通过一个`srcva`和一个`sz`传入，`srcva`是用户页表的虚拟地址，`sz`是要复制的大小。由于内核无法直接解引用用户指针，所以它必须`walkaddr`在用户页表中包含待复制数据的每一页，得到实际的内核可以直接解引用的物理地址，然后复制到`dst`。大概是这样：
+
+```c
+for 用户页表中包含待复制数据的每一个页的起始地址 va0:
+  pa0 = walkaddr(userpagetable, va0)
+  memmove(dst, pa0, PGSIZE)
+```
+
+当然，这个复制并不像上面伪代码那样简单，实际的复制过程对应`copyin`中的代码，也没复杂太多。
+
+我们的实验目标是跳过这种繁杂的过程。如果内核可以直接解引用用户指针，那它便可以直接通过用户指针进行复制，也就是这样：
+
+```c
+memmove(dst, srcva, len)
+```
+
+这种新的复制过程对应`copyin_new`中的代码。
+
+我们上一个实验已经帮我们做了一些事情，通过独有的PTE0，每个进程享有1GB的私有内核页表空间，我们可以将用户页表中的数据一一映射到内核页表的同个虚拟地址上，这样当使用内核页表时，就能直接解引用用户指针。当然，这1GB里有一些设备，我们不能覆盖这些设备的内存，所以我们只有PLIC以下的内存可以使用，题目中也限制了，我们必须修改xv6的代码，让进程的大小无法grow到PLIC。
+
+> 需要注意的是PLIC下面还有一个CLINT设备，它启动后就没用了，在进程的内核页表中由于我们可能覆盖它，所以我们得先对它unmap，否则会报remap。
+
+这意味着每一次用户页表发生改变，我们都必须将改变映射给内核页表。题目的hint中给了用户页表会发生改变的位置：`fork()`、`exec()`以及`sbrk()`，我们需要做的是在这里将改动反映到进程的内核页表上，和上一个题目一样，我们不用复制物理页，只建立映射就行。
+
+
+**Step1. kvmcopy**
+
+基本上是完全复制uvmcopy，只不过可以设置start（因为sbrk要求我们并不是从0开始复制），删除了实际物理页的创建，而是使用原来的物理页进行映射。flag中的`PTE_U`必须清除，因为在supervisor模式下不能读取具有PTE_U标记的PTE。
+
+```c
+int
+kvmcopy(pagetable_t old, pagetable_t new, uint64 start, uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  for(i = PGROUNDUP(start); i < start + sz; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
+      panic("kvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("kvmcopy: page not present");
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte) & ~PTE_U;
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      goto err;
+    }
+  }
+  return 0;
+
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
+```
+
+**Step2. kvmdealloc**
+
+在sbrk中，用户内存缩减时我们也需要反映到内核页表，不然下次再sbrk就remap了。
+
+这个就完全复制`uvmdealloc`，只是在调用`uvmunmap`时将`do_free`设置成0，这样就不会清除实际的物理页了，因为物理页是由与之相对应的`uvmdealloc`清除的：
+
+```c
+uint64
+kvmdealloc(pagetable_t pagetable, uint oldsz, uint64 newsz) {
+  if(newsz >= oldsz)
+    return oldsz;
+
+  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
+    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 0);
+  }
+
+  return newsz;
+}
+```
+
+**Step3. fork/exec/sbrk/userinit的修改**
+
+```c
+int
+fork(void)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  // Allocate process.
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  // Copy user memory from parent to child.
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+
+  // 拷贝刚刚复制的用户页表给新进程的内核页表
+  // 这里能不能用p->pagetable进行拷贝呢？
+  // 答案是不能，我之前犯了这个错误，我认为p和np的pagetable都是一样的，但实际上它们拥有不同的物理页
+  // 你不能把内核页表里的PTE映射到另一个进程的物理页上，这样就泰酷辣~
+  if (kvmcopy(np->pagetable, np->kpagetable, 0, p->sz) < 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+
+  // ...
+}
+```
+
+```c
+// in exec.c -> exec()
+// ...
+
+  for(last=s=path; *s; s++)
+    if(*s == '/')
+      last = s+1;
+  safestrcpy(p->name, last, sizeof(p->name));
+    
+  // 释放加载另一个程序之前，进程内核页表中的数据
+  uvmunmap(p->kpagetable, 0, PGROUNDUP(oldsz) / PGSIZE, 0);
+  // 将新的数据拷贝进去
+  if (kvmcopy(pagetable, p->kpagetable, 0, sz) < 0) 
+    goto bad;
+  // Commit to the user image.
+  oldpagetable = p->pagetable;
+  p->pagetable = pagetable;
+
+// ...
+```
+
+> exec里为程序建立了新的用户页表，我们能不能使用类似的策略建立新的内核页表，而不是像上面那样替换呢？
+>
+> 不行，进程在内核中运行依赖内核页表中的内核栈，如果你将原来的内核页表释放，内核栈也释放了，当完成释放的方法调用后进程将遇到一个内存访问错误，它没法读原来的内核栈。
+> 
+> 上面的方式没有问题，因为我们解映射的数据不可能超过PLIC，根本碰不到内核栈。
+
+我们还需要在exec加载程序到内存的循环中判断是否已经越过了PLIC，如果越过了我们要终止程序：
+```c
+// kernel/exec.c
+if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
+  goto bad;
+if (sz1 >= PLIC) 
+  goto bad;
+sz = sz1;
+```
+
+```c
+int
+growproc(int n)
+{
+  uint sz;
+  struct proc *p = myproc();
+
+  sz = p->sz;
+  if (sz + n >= PLIC) return -1;
+  if(n > 0){
+    uint64 newsize;
+    if((newsize = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+      return -1;
+    }
+    if (kvmcopy(p->pagetable, p->kpagetable, sz, n) < 0) {
+      // 如果copy失败，视为grow失败，要把用户页表中的内容也dealloc掉
+      uvmdealloc(p->pagetable, newsize, sz);
+      return -1;
+    }
+    sz = newsize;
+  } else if(n < 0){
+    uvmdealloc(p->pagetable, sz, sz + n);
+    sz = kvmdealloc(p->kpagetable, sz, sz + n);
+  }
+  p->sz = sz;
+  return 0;
+}
+```
+
+除了`/init`进程，其它进程都是fork出来的，如果需要的话，通过exec加载其它程序。我们把fork和exec中的复制都搞定了，但`/init`进程还没搞，它在`userinit`中使用`uvminit`将`initcode`加载到内存中，`initcode`就是`exec("/init")`：
+
+```c
+void
+userinit(void)
+{
+  struct proc *p;
+
+  p = allocproc();
+  initproc = p;
+  
+  // allocate one user page and copy init's instructions
+  // and data into it.
+  uvminit(p->pagetable, initcode, sizeof(initcode));
+  // 复制initcode
+  kvmcopy(p->pagetable, p->kpagetable, 0, PGSIZE);
+  p->sz = PGSIZE;
+
+  // ...
+}
+```
+
+**Step3. 修改copyin和copyinstr**
+
+```c
+int
+copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
+{
+  return copyin_new(pagetable, dst, srcva, len);
+}
+
+int
+copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+{
+  return copyinstr_new(pagetable, dst, srcva, max);
+}
+```
+
+Linux uses a technique similar to what you have implemented. Until a few years ago many kernels used the same per-process page table in both user and kernel space, with mappings for both user and kernel addresses, to avoid having to switch page tables when switching between user and kernel space. However, that setup allowed side-channel attacks such as Meltdown and Spectre.
+
+> Explain why the third test srcva + len < srcva is necessary in copyin_new(): give values for srcva and len for which the first two test fail (i.e., they will not cause to return -1) but for which the third one is true (resulting in returning -1).
+
