@@ -177,6 +177,7 @@ UPROGS=\
 	$U/_zombie\
 	$U/_call\
 	$U/_hw\
+	$U/_bttest\
 
 
 

@@ -66,4 +66,78 @@ Read the code in call.asm for the functions g, f, and main. The instruction manu
 > 调用`x`会把a2设置成6，这样`printf`就会输出`x=3 y=6`。（需要在Makefile的CFLAGS中关闭编译器优化并make clean）
 
 
+## Backtrace (moderate)
+
+For debugging it is often useful to have a backtrace: a list of the function calls on the stack above the point at which the error occurred.
+
+> Implement a backtrace() function in kernel/printf.c. Insert a call to this function in sys_sleep, and then run bttest, which calls sys_sleep. Your output should be as follows:
+> ```
+> backtrace:
+> 0x0000000080002cda
+> 0x0000000080002bb6
+> 0x0000000080002898
+> ```
+> After bttest exit qemu. In your terminal: the addresses may be slightly different but if you run addr2line -e kernel/kernel (or riscv64-unknown-elf-addr2line -e kernel/kernel) and cut-and-paste the above addresses as follows:
+> ```sh
+> $ addr2line -e kernel/kernel
+> 0x0000000080002de2
+> 0x0000000080002f4a
+> 0x0000000080002bfc
+> Ctrl-D
+> ```
+> 
+> You should see something like this:
+> ```
+> kernel/sysproc.c:74
+> kernel/syscall.c:224
+> kernel/trap.c:85
+> ```
+
+### 思路
+
+Hint中给了一个[课堂笔记](https://pdos.csail.mit.edu/6.828/2020/lec/l-riscv-slides.pdf)，其中包含栈的样子：
+
+![栈是什么样的](./scshoot01.png)
+
+栈中包含若干个栈帧（stack frame），每一个方法调用就是一个栈帧。fp（frame pointer）寄存器指向当前栈帧的顶部。除此之外，每一个栈帧的第二个槽位保存了上一个栈帧的fp。所以我们就可以通过读当前fp寄存器，然后递归的读栈上的第二个槽位找到前一个栈帧即可完成实验。
+
+gcc用s0作为frame pointer。
+
+**Step1. 在kernel/risc-v.h中添加读取fp寄存器的函数**
+
+```c
+// kernel/risc-v.c
+// read the current frame pointer
+static inline uint64
+r_fp() {
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r" (x) );
+  return x;
+}
+```
+
+**Step2. 在printf.c中添加backtrace函数**
+
+我们可以通过判断fp是不是在当前栈中来结束循环，因为xv6的栈只占用一页，我们可以通过`PGROUNDUP`来获得栈顶位置，`PGROUNDDOWN`获得栈底位置，若某一次得到的下一个fp地址不在栈中，就跳出循环。
+
+```c
+// kernel/printf.c
+uint64 read_slot(uint64 fp, int slot) {
+  int offset = (slot+1) * 8;
+  return *((uint64*)(fp - offset));
+}
+
+void backtrace() {
+  uint64 curr_fp = r_fp(), sttop = PGROUNDUP(curr_fp), stbottom = PGROUNDDOWN(curr_fp);
+  printf("backtrace\n");
+  while(curr_fp < sttop && curr_fp > stbottom) {
+    printf("%p\n", read_slot(curr_fp, 0));
+    curr_fp = read_slot(curr_fp, 1);
+  }
+}
+```
+
+**Step.3 向sys_sleep、defs.h、Makefile中添加内容**
+
+略
 

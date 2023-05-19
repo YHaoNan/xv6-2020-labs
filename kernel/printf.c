@@ -132,3 +132,17 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+uint64 read_slot(uint64 fp, int slot) {
+  int offset = (slot+1) * 8;
+  return *((uint64*)(fp - offset));
+}
+
+void backtrace() {
+  uint64 curr_fp = r_fp(), sttop = PGROUNDUP(curr_fp), stbottom = PGROUNDDOWN(curr_fp);
+  printf("backtrace\n");
+  while(curr_fp < sttop && curr_fp > stbottom) {
+    printf("%p\n", read_slot(curr_fp, 0));
+    curr_fp = read_slot(curr_fp, 1);
+  }
+}
