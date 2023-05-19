@@ -103,4 +103,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int inhandler;
+  int sigticks;                // 需要多少个ticks调用一次sighandler
+  int ticks_sincelastcall;     // 距离上次调用sighandler已经有了多少ticks
+  uint64 sighandler;           // 当ticks == sigticks时，要调用的函数指针。我们认为，当sighandler和sigtick共同为0时，alarm功能是关闭的。
+  struct trapframe *trapframe4sig; // data page for trampoline.S
 };

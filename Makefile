@@ -178,6 +178,7 @@ UPROGS=\
 	$U/_call\
 	$U/_hw\
 	$U/_bttest\
+	$U/_alarmtest\
 
 
 
