@@ -46,9 +46,17 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
+  struct proc *p = myproc();
+  addr = p->sz;
+  uint64 newsize = addr + n;
+  if (newsize >= TRAPFRAME || newsize < PGROUNDUP(myproc()->trapframe->sp)) {
     return -1;
+  }
+  if (n < 0 && growproc(n) < 0) {
+    return -1;
+  } else if (n > 0){
+    myproc()->sz += n;
+  }
   return addr;
 }
 

@@ -694,3 +694,19 @@ procdump(void)
     printf("\n");
   }
 }
+
+// 成功返回pa，失败返回0，va必须已经对齐到页边界
+uint64
+procallocmap(pagetable_t pgtbl, uint64 va) {
+  void *pa;
+  if (va >= myproc()->sz || va < PGROUNDUP(myproc()->trapframe->sp)) 
+    return 0;
+  if ((pa=kalloc()) != 0) {
+    if(mappages(pgtbl, va, PGSIZE, (uint64)pa, PTE_U | PTE_R | PTE_W) < 0) {
+      kfree(pa);
+      return 0;
+    }
+  }
+  return (uint64)pa;
+}
+

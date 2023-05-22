@@ -71,8 +71,10 @@ kvminithart()
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
-  if(va >= MAXVA)
+  if(va >= MAXVA) {
+    printf("va %p, MAXVA: %p, TRAPFRAME: %p\n", va, MAXVA, TRAPFRAME);
     panic("walk");
+  }
 
   for(int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
@@ -180,10 +182,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+    if((pte = walk(pagetable, a, 0)) == 0) continue;
+      // panic("uvmunmap: walk");
+    if((*pte & PTE_V) == 0) continue;
+      // panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -314,10 +316,10 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    if((pte = walk(old, i, 0)) == 0) continue;
+      // panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0) continue;
+      // panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -359,7 +361,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if(pa0 == 0 && (pa0 = procallocmap(pagetable, va0)) == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
     if(n > len)
@@ -384,7 +386,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if(pa0 == 0 && (pa0 = procallocmap(pagetable, va0)) == 0)
       return -1;
     n = PGSIZE - (srcva - va0);
     if(n > len)
@@ -439,4 +441,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// kernel/vm.c
+void __print_level(int level) {
+  for (int i=1;i<=level; i++) {
+    printf("..");
+    if (i!=level) {
+      printf(" ");
+    }
+  }
+}
+
+// 给定一个页表的起始地址，遍历页表中的512个页表项，并对每一个子页表调用__vmprint
+void 
+__vmprint(pagetable_t pgtbl, int level) {
+  for (int i=0; i<512; i++) {
+    pte_t pte = pgtbl[i];
+    
+    if (pte & PTE_V) {
+      uint64 pa = PTE2PA(pte);
+      __print_level(level);
+      printf("%d: pte %p pa %p\n", i, pte, pa);
+      if (level < 3) __vmprint((uint64*)pa, level + 1);
+    }
+  }
+}
+
+void
+vmprint(pagetable_t pgtbl) {
+  printf("page table %p\n", pgtbl);
+  __vmprint(pgtbl, 1);
 }
