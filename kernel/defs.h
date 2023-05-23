@@ -145,6 +145,7 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+int             try_cow(pagetable_t pgtbl, uint64 va);
 
 // uart.c
 void            uartinit(void);

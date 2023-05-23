@@ -28,7 +28,35 @@ trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
+pte_t *
+walk(pagetable_t pagetable, uint64 va, int alloc);
 
+/**
+ * 该函数将判断va映射的物理页是否是一个cow页，如果是就尝试创建一个新页并映射，维护好引用计数
+ * 如果不是cow页，返回0
+ * 如果过程中出错，返回-1
+ * 成功，返回1
+*/
+int try_cow(pagetable_t pgtbl, uint64 va) {
+  if (va >= MAXVA) return -1;
+  pte_t *pte = walk(pgtbl, va, 0);
+  if(pte == 0 || (*pte & (PTE_V)) == 0 || (*pte & PTE_U) == 0) return -1;  
+  uint64 flag = PTE_FLAGS(*pte);
+  if (flag & PTE_COW) {
+    flag |= PTE_W;
+    flag &= ~PTE_COW;
+    void *new_pa = kalloc();
+    if (new_pa == 0) return -1;
+
+    uint64 ori_pa = PTE2PA(*pte);
+    memmove(new_pa, (void*)ori_pa, PGSIZE);
+    *pte = PA2PTE(new_pa) | flag;
+    kfree((void*)ori_pa);
+    return 1;
+  } else {
+    return 0;
+  }
+}
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -67,6 +95,15 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 15) {
+    int ret = try_cow(myproc()->pagetable, r_stval());
+    if (ret <= 0) {
+      if (ret == 0) {
+        printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+        printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      }
+      p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
