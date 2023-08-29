@@ -2,6 +2,7 @@
 MIT6.S081/Fall 2020操作系统实验代码。尽量一天做一个，但是人是扛不住懒的。
 
 每个分支是一个实验：
+> 注：从Lock实验开始迁移到Fall 2021的实验题目和代码，因为2020的代码需要的tool chain比较老，我实在不想在新电脑上装那些老tool chain。
 
 Lab|直链|概述
 :-|:-|:-
@@ -12,7 +13,7 @@ Lab|直链|概述
 #5 Lazy Allocation|[lazy](https://github.com/YHaoNan/xv6-2020-labs/tree/lazy)|使用虚拟内存以及陷阱技术实现内存的懒分配，以应对用户进程预先申请内存的情况
 #6 Copy On Write|[cow](https://github.com/YHaoNan/xv6-2020-labs/tree/cow)|使用虚拟内存以及陷阱技术实现copy on write，让fork系统调用拥有更好的性能，更加节省内存
 #7 Multithreading|[thread](https://github.com/YHaoNan/xv6-2020-labs/tree/syscall)|实现用户级线程（协程），使用pthread库
-#8 Lock|lock|
+#8 Lock|[lock](https://github.com/YHaoNan/xv6-2020-labs/tree/lock)|目前实现了第一个Memory Allocator，感觉代码写的很漂亮
 #9 File System|fs|
 #10 mmap|mmap|
 #11 Network Driver|net|
