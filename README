@@ -1,47 +1,47 @@
-xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
-Version 6 (v6).  xv6 loosely follows the structure and style of v6,
-but is implemented for a modern RISC-V multiprocessor using ANSI C.
+# Memory Allocator
+太简单了不写了
 
-ACKNOWLEDGMENTS
+# Buffer cache (hard)
+如果多个进程密集的使用文件系统，它们将在`bcache.lock`上竞争，这把锁在`kernel/bio.c`中，保护了磁盘快的缓存。`bcachetest`创建了多个进程，为了产生`bcache.lock`伤的竞争，它们重复的读取不同的文件。
 
-xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
-to Peer Communications; ISBN: 1-57398-013-7; 1st edition (June 14,
-2000)). See also https://pdos.csail.mit.edu/6.828/, which
-provides pointers to on-line resources for v6.
+如果你查看`kernel/bio.c`中的代码，你会看到`bcache.lock`保护了缓存的块缓冲链表、每一个块缓冲的引用计数（`b->refcnt`）以及缓存块的身份（`b->dev`和`b->blockno`）。
 
-The following people have made contributions: Russ Cox (context switching,
-locking), Cliff Frey (MP), Xiao Yu (MP), Nickolai Zeldovich, and Austin
-Clements.
+`kernel/bio.c`使用了一把大内核锁来维护lru链表的正确性，但这会造成过多的锁竞争：
+```c
+static struct buf*
+bget(uint dev, uint blockno)
+{
+  struct buf *b;
 
-We are also grateful for the bug reports and patches contributed by
-Takahiro Aoyagi, Silas Boyd-Wickizer, Anton Burtsev, Ian Chen, Dan
-Cross, Cody Cutler, Mike CAT, Tej Chajed, Asami Doi, eyalz800, Nelson
-Elhage, Saar Ettinger, Alice Ferrazzi, Nathaniel Filardo, flespark,
-Peter Froehlich, Yakir Goaron,Shivam Handa, Matt Harvey, Bryan Henry,
-jaichenhengjie, Jim Huang, Matúš Jókay, Alexander Kapshuk, Anders
-Kaseorg, kehao95, Wolfgang Keller, Jungwoo Kim, Jonathan Kimmitt,
-Eddie Kohler, Vadim Kolontsov , Austin Liew, l0stman, Pavan
-Maddamsetti, Imbar Marinescu, Yandong Mao, , Matan Shabtay, Hitoshi
-Mitake, Carmi Merimovich, Mark Morrissey, mtasm, Joel Nider,
-OptimisticSide, Greg Price, Jude Rich, Ayan Shafqat, Eldar Sehayek,
-Yongming Shen, Fumiya Shigemitsu, Cam Tenny, tyfkda, Warren Toomey,
-Stephen Tu, Rafael Ubal, Amane Uehara, Pablo Ventura, Xi Wang, Keiichi
-Watanabe, Nicolas Wolovick, wxdao, Grant Wu, Jindong Zhang, Icenowy
-Zheng, ZhUyU1997, and Zou Chang Wei.
+  acquire(&bcache.lock);
 
-The code in the files that constitute xv6 is
-Copyright 2006-2020 Frans Kaashoek, Robert Morris, and Russ Cox.
+  // Is the block already cached?
+  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
 
-ERROR REPORTS
+  // Not cached.
+  // Recycle the least recently used (LRU) unused buffer.
+  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+    if(b->refcnt == 0) {
+      b->dev = dev;
+      b->blockno = blockno;
+      b->valid = 0;
+      b->refcnt = 1;
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+  panic("bget: no buffers");
+}
+```
 
-Please send errors and suggestions to Frans Kaashoek and Robert Morris
-(kaashoek,rtm@mit.edu). The main purpose of xv6 is as a teaching
-operating system for MIT's 6.S081, so we are more interested in
-simplifications and clarifications than new features.
+主要的问题是为了找出一个能用的buf，其它无关的buf的操作也得等待，我们可以用一个hash表进一步分散竞争。
 
-BUILDING AND RUNNING XV6
-
-You will need a RISC-V "newlib" tool chain from
-https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
-riscv64-softmmu. Once they are installed, and in your shell
-search path, you can run "make qemu".
+需要注意的就是死锁问题，有个坑，就是给一个buf转移hash桶到时候，需要两个桶都上锁，此时维护一个一致的上锁顺序就行，我这里是优先上下标较小的桶。

@@ -23,15 +23,25 @@
 #include "fs.h"
 #include "buf.h"
 
-struct {
-  struct spinlock lock;
-  struct buf buf[NBUF];
+#define BUKSIZE 13
+#define BUFSIZE (BUKSIZE * 10)
+#define hash(dev, blockno) (((dev) % BUKSIZE + (blockno) % BUKSIZE) % BUKSIZE)
 
+struct {
+  struct buf buf[BUFSIZE];
+  struct spinlock lock;
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
-  struct buf head;
+  // struct buf head;
 } bcache;
+
+struct buk {
+  // head is a pesudo buf node, 
+  // head.next is the real first node in bucket
+  struct buf head; 
+  struct spinlock lock;
+} hashtable[BUKSIZE];
 
 void
 binit(void)
@@ -39,52 +49,118 @@ binit(void)
   struct buf *b;
 
   initlock(&bcache.lock, "bcache");
-
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+  for(b = bcache.buf; b < bcache.buf+BUFSIZE; b++){
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+  }
+
+  // 平均分配buf到每个坑位
+  b = bcache.buf;
+  for(int i=0; i<BUKSIZE; i++) {
+    initlock(&hashtable[i].lock, "bcache-buk");
+    // buf数量是buk数量的倍数，所以不会有遗漏的
+    for (int j=0; j<BUFSIZE/BUKSIZE; j++) {
+      b->dev = 0; // 不会有dev=0的
+      b->blockno = i;
+      b->next = hashtable[i].head.next;
+      b->prev = &hashtable[i].head;
+      if (hashtable[i].head.next) hashtable[i].head.next->prev = b;
+      hashtable[i].head.next = b;
+      b++;
+    }
   }
 }
 
+void init_buf(uint dev, uint blockno, struct buf* b) {
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+}
+
+// 在一个buk中寻找最近最少使用的unusedbuf
+// 调用时必须持有buk的锁
+// 如果没有，返回null pointer
+struct buf* find_lru_unused_buf(struct buk *buk) {
+  uint minusedtime = ticks;
+  struct buf *popbuf = 0;
+  
+  for (struct buf *cur=buk->head.next; cur; cur=cur->next) {
+    if (cur->refcnt == 0  && cur->lastusetime <= minusedtime) {
+      popbuf = cur;
+      minusedtime = cur->lastusetime;
+    }
+  }
+
+  if (popbuf) {
+    popbuf->prev->next = popbuf->next;
+    if (popbuf->next) popbuf->next->prev = popbuf->prev;
+    popbuf->next = 0;
+    popbuf->prev = 0;
+  }
+  return popbuf;
+}
+void insert_buf_to_buk(struct buf *buf, struct buk *buk) {
+  buf->prev = &buk->head;
+  buf->next = buk->head.next;
+  if (buk->head.next) buk->head.next->prev = buf;
+  buk->head.next = buf;
+}
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
 static struct buf*
 bget(uint dev, uint blockno)
 {
-  struct buf *b;
+  int curbukidx = hash(dev, blockno);
+  struct buk *buk = &hashtable[curbukidx];
 
-  acquire(&bcache.lock);
+  acquire(&buk->lock);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  struct buf *cur;
+  for (cur=buk->head.next; cur; cur=cur->next) {
+    if (cur->dev == dev && cur->blockno == blockno) {
+      cur->refcnt++;
+      release(&buk->lock);
+      acquiresleep(&cur->lock);
+      return cur;
     }
   }
 
   // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  // 首先尝试从自己的桶剔除最近最少使用的unusedbuf
+  struct buf *popbuf = find_lru_unused_buf(buk);
+  if (popbuf) {
+    init_buf(dev, blockno, popbuf);
+    insert_buf_to_buk(popbuf, buk);
+    release(&buk->lock);
+    acquiresleep(&popbuf->lock);
+    return popbuf;
+  }
+  release(&buk->lock);
+
+  // 尝试从其它的桶剔除最近最少使用的unusedbuf
+  struct buk *stealbuk;
+  struct spinlock *fst, *sec;
+  for (int i=0; i<BUKSIZE; i++) {
+    if (i==curbukidx) continue;
+    stealbuk = &hashtable[i];
+    // 按指定顺序加锁
+    fst = i < curbukidx ? &stealbuk-> lock : &buk->lock;
+    sec = i < curbukidx ? &buk->lock : &stealbuk->lock;
+    acquire(fst); acquire(sec);
+    popbuf = find_lru_unused_buf(stealbuk);
+    if (popbuf) {
+      init_buf(dev, blockno, popbuf);
+      insert_buf_to_buk(popbuf, buk);
+    }
+    release(sec); release(fst);
+    if (popbuf) {
+      acquiresleep(&popbuf->lock);
+      return popbuf;
     }
   }
+  
   panic("bget: no buffers");
 }
 
@@ -119,35 +195,32 @@ brelse(struct buf *b)
   if(!holdingsleep(&b->lock))
     panic("brelse");
 
+  struct buk *buk = &hashtable[hash(b->dev, b->blockno)];
+  
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  acquire(&buk->lock);
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->lastusetime = ticks;
   }
   
-  release(&bcache.lock);
+  release(&buk->lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  struct buk *buk = &hashtable[hash(b->dev, b->blockno)];
+  acquire(&buk->lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&buk->lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  struct buk *buk = &hashtable[hash(b->dev, b->blockno)];
+  acquire(&buk->lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&buk->lock);
 }
-
-
