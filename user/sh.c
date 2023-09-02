@@ -52,7 +52,7 @@ struct backcmd {
 int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
-
+__attribute__((noreturn))
 // Execute cmd.  Never returns.
 void
 runcmd(struct cmd *cmd)

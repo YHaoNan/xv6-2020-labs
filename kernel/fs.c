@@ -365,15 +365,41 @@ iunlockput(struct inode *ip)
   iput(ip);
 }
 
-// Inode content
-//
-// The content (data) associated with each inode is stored
-// in blocks on the disk. The first NDIRECT block numbers
-// are listed in ip->addrs[].  The next NINDIRECT blocks are
-// listed in block ip->addrs[NDIRECT].
+static uint
+bmap_dbl(struct inode *ip, uint bn) {
+  uint main_addr, nslot, indirect_addr, *tb;
+  struct buf *mainblk, *indirectblk;
+  if (bn < NINDIRECT_2) {
+    // no doubly indirect blocks
+    if ((main_addr = ip->addrs[NDIRECT+1]) == 0) {
+      ip->addrs[NDIRECT+1] = main_addr = balloc(ip->dev);
+    }
+    mainblk = bread(ip->dev, main_addr);
+    // calculate bn in ?th slot. It's blocknumber / itemcount in a block
+    nslot = bn / NINDIRECT_1;
+    tb = (uint*) mainblk->data;
+    if ((indirect_addr=tb[nslot]) == 0) {
+      // if not initialize, allocate.
+      tb[nslot] = indirect_addr = balloc(ip->dev);
+      // write item in mainblk
+      log_write(mainblk);
+    }
+    brelse(mainblk);
+    
+    indirectblk = bread(ip->dev, indirect_addr);
+    nslot = bn % NINDIRECT_1;
+    tb = (uint*) indirectblk -> data;
+    if ((indirect_addr=tb[nslot]) == 0) {
+      tb[nslot] = indirect_addr = balloc(ip->dev);
+      // write item in mainblk
+      log_write(indirectblk);
+    }
+    brelse(indirectblk);
+    return indirect_addr;
+  }
+  panic("bmap: out of range");
+}
 
-// Return the disk block address of the nth block in inode ip.
-// If there is no such block, bmap allocates one.
 static uint
 bmap(struct inode *ip, uint bn)
 {
@@ -387,7 +413,7 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
+  if(bn < NINDIRECT_1){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
@@ -401,37 +427,45 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
-  panic("bmap: out of range");
+  bn -= NINDIRECT_1;
+
+  return bmap_dbl(ip, bn);
 }
 
+void _itrunc_recur(uint *table, int begin, int sz, int level, int dev) {
+  struct buf *buf;
+
+  for (int i=begin; i<begin+sz; i++) {
+    uint addr = table[i];
+    // 如果addr为0直接不处理
+    if (!addr) continue;
+    // 如果不是最后一层，读出间接块递归释放
+    if (level != 0) {
+      buf = bread(dev, addr);
+      // uint *tb = kalloc();
+      // memmove((void*)tb, (void*)buf->data, 1024);
+      _itrunc_recur((uint *)buf->data, 0, NINDIRECT_1, level-1, dev);
+      brelse(buf);
+      // 要把间接块也给释放
+      bfree(dev, addr);
+    } else {
+      // 最后一层，直接释放底层文件块
+      bfree(dev, addr);
+    }
+    table[i] = 0;
+  }
+}
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
-
-  for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
-    }
-  }
-
-  if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
-    }
-    brelse(bp);
-    bfree(ip->dev, ip->addrs[NDIRECT]);
-    ip->addrs[NDIRECT] = 0;
-  }
-
+  // trunc directly block
+  _itrunc_recur(ip->addrs, 0, NDIRECT, 0, ip->dev);
+  // trunc singly indirectly block
+  _itrunc_recur(ip->addrs, NDIRECT, 1, 1, ip->dev);
+  // trunc doubly indirectly block
+  _itrunc_recur(ip->addrs, NDIRECT+1, 1, 2, ip->dev);
   ip->size = 0;
   iupdate(ip);
 }
