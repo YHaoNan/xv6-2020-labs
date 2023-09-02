@@ -12,8 +12,8 @@ Lab|直链|概述
 #3 Traps|[traps](https://github.com/YHaoNan/xv6-2020-labs/tree/traps)|深入了解陷阱，你会利用时钟中断开发一个用于计算密集型任务的alarm系统调用
 #5 Lazy Allocation|[lazy](https://github.com/YHaoNan/xv6-2020-labs/tree/lazy)|使用虚拟内存以及陷阱技术实现内存的懒分配，以应对用户进程预先申请内存的情况
 #6 Copy On Write|[cow](https://github.com/YHaoNan/xv6-2020-labs/tree/cow)|使用虚拟内存以及陷阱技术实现copy on write，让fork系统调用拥有更好的性能，更加节省内存
-#7 Multithreading|[thread](https://github.com/YHaoNan/xv6-2020-labs/tree/syscall)|实现用户级线程（协程），使用pthread库
+#7 Multithreading|[thread](https://github.com/YHaoNan/xv6-2020-labs/tree/thread)|实现用户级线程（协程），使用pthread库
 #8 Lock|[lock](https://github.com/YHaoNan/xv6-2020-labs/tree/lock)|xv6为了简单，很多地方使用了大内核锁设计，在极端情况下锁竞争会很激烈，这个Lab要修改内存分配器和Buffer Cache中的锁设计，降低锁竞争，提高并发度
-#9 File System|fs|
+#9 File System|[fs](https://github.com/YHaoNan/xv6-2020-labs/tree/fs)|目前完成了bigfile实验，xv6的inode默认只有一级间接块，这让它的文件大小受限，bigfile扩展一个二级间接块
 #10 mmap|mmap|
 #11 Network Driver|net|
