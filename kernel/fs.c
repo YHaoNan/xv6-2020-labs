@@ -664,27 +664,35 @@ namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
 
+  // 如果开头是/，从根目录开始绝对寻址
   if(*path == '/')
     ip = iget(ROOTDEV, ROOTINO);
+  // 从cwd开始相对寻址
   else
     ip = idup(myproc()->cwd);
 
+  // name等于路径中最高层级的名字，path等于去掉最高层级的剩余路径
+  // 比如skipelem("/a/b/c")，path = b/c，name=a
+  // 该循环相当于按顺序取出路径中的每一个名字
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
+    // 如果ip不是文件夹，发生了某种错误
     if(ip->type != T_DIR){
       iunlockput(ip);
       return 0;
     }
+    // 如果需要的是父级
     if(nameiparent && *path == '\0'){
       // Stop one level early.
       iunlock(ip);
       return ip;
     }
+    // 在目录inode下查找
     if((next = dirlookup(ip, name, 0)) == 0){
       iunlockput(ip);
       return 0;
     }
-    iunlockput(ip);
+    iunlockput(ip); // unlock, 所以多个进程只是不能同时访问一个文件或文件夹
     ip = next;
   }
   if(nameiparent){

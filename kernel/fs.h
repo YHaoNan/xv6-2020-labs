@@ -58,7 +58,7 @@ struct dinode {
 #define DIRSIZ 14
 
 struct dirent {
-  ushort inum;
-  char name[DIRSIZ];
+  ushort inum;          // inode number, directory entry with 0 inum is free
+  char name[DIRSIZ];    // item name
 };
 

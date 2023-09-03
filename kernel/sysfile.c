@@ -254,6 +254,9 @@ create(char *path, short type, short major, short minor)
     ilock(ip);
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
+    if (type == T_SYMLINK) {
+      return ip;
+    }
     iunlockput(ip);
     return 0;
   }
@@ -283,6 +286,30 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+/**
+ * 给定一个path，解析出对应的inode
+ */
+struct inode* 
+_resolve_lock(char *path, int level, int options) {
+  if (level == 10) {
+    printf("Maybe we got a cycle!\n");
+    return 0;
+  }
+  struct inode *ip;
+  if ((ip = namei(path)) == 0) {
+    return 0;
+  } 
+  ilock(ip);
+  if(ip->type == T_SYMLINK && !(options & O_NOFOLLOW)) { 
+    int readlen;
+    readi(ip, 0, (uint64)&readlen, 0, sizeof(int));
+    readi(ip, 0, (uint64)path, sizeof(int), readlen + 1);
+    iunlockput(ip);
+    return _resolve_lock(path, level + 1, options);
+  }
+  return ip;
+}
+
 uint64
 sys_open(void)
 {
@@ -304,11 +331,11 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
+    if((ip = _resolve_lock(path, 0, omode)) == 0){
       end_op();
       return -1;
     }
-    ilock(ip);
+    // ilock(ip); // already locked
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -483,4 +510,26 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64 
+sys_symlink(void) {
+  // target是原文件path，source是符号连接path
+  char target[MAXPATH], source[MAXPATH];
+  struct inode *ip;
+
+  begin_op();
+  // extract target and source path, create new inode
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, source, MAXPATH) < 0 || (ip=create(source, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+  int pathlen = strlen(target);
+  writei(ip, 0, (uint64)&pathlen, 0, sizeof(int));
+  writei(ip, 0, (uint64)target, sizeof(int), pathlen + 1);
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
+  return 0;
+
 }
